@@ -411,8 +411,8 @@ def procesar_todo(uploaded_files, csv_url, progress_bar, log):
 
         progress_bar.progress(85, text="Generando ZIPs de salida...")
 
-        # 7. Crear 4 ZIPs simples: ARO, ZENTRIX, ARO sin renombrar, ZENTRIX sin renombrar
-        # Archivos planos dentro de cada ZIP (sin subcarpetas)
+        # 7. Crear ZIPs: ARO, ZENTRIX, ARO sin renombrar, ZENTRIX sin renombrar
+        # Con periodo en el nombre (ej: ARO_Q05.zip). Archivos planos.
         persist_dir = Path("/tmp/recibos_resultado")
         if persist_dir.exists():
             shutil.rmtree(persist_dir)
@@ -421,12 +421,26 @@ def procesar_todo(uploaded_files, csv_url, progress_bar, log):
         zips_info = {}
         all_pdfs = list(output_dir.rglob("*.pdf"))
 
+        # Detectar periodo global (todos los periodos encontrados menos GENERAL)
+        periodos = set()
+        for file in all_pdfs:
+            parts = file.relative_to(output_dir).parts
+            if len(parts) > 1 and parts[0].upper() != "GENERAL":
+                periodos.add(parts[0])
+        # Usar el periodo si hay exactamente uno; si hay varios concatenarlos
+        if len(periodos) == 1:
+            periodo_str = list(periodos)[0]
+        elif len(periodos) > 1:
+            periodo_str = "_".join(sorted(periodos))
+        else:
+            periodo_str = ""
+
         # 4 categorias fijas
-        categorias = {
-            "ARO": {"label": "ARO", "sin_renombrar": False, "files": []},
-            "ZENTRIX": {"label": "ZENTRIX", "sin_renombrar": False, "files": []},
-            "ARO_SINRENOMBRAR": {"label": "ARO — Sin renombrar", "sin_renombrar": True, "files": []},
-            "ZENTRIX_SINRENOMBRAR": {"label": "ZENTRIX — Sin renombrar", "sin_renombrar": True, "files": []},
+        tipos = {
+            "ARO": [],
+            "ZENTRIX": [],
+            "ARO_SINRENOMBRAR": [],
+            "ZENTRIX_SINRENOMBRAR": [],
         }
 
         for file in all_pdfs:
@@ -435,26 +449,38 @@ def procesar_todo(uploaded_files, csv_url, progress_bar, log):
 
             if is_sin_ren:
                 if "ZTX" in rel_upper or "ZENTRIX" in rel_upper:
-                    categorias["ZENTRIX_SINRENOMBRAR"]["files"].append(file)
+                    tipos["ZENTRIX_SINRENOMBRAR"].append(file)
                 else:
-                    categorias["ARO_SINRENOMBRAR"]["files"].append(file)
+                    tipos["ARO_SINRENOMBRAR"].append(file)
             elif "ZENTRIX" in rel_upper:
-                categorias["ZENTRIX"]["files"].append(file)
+                tipos["ZENTRIX"].append(file)
             elif "/ARO/" in ("/" + rel_upper + "/") or rel_upper.startswith("ARO/"):
-                categorias["ARO"]["files"].append(file)
+                tipos["ARO"].append(file)
             else:
-                # Fallback por tamano
                 if file.stat().st_size > SIZE_THRESHOLD:
-                    categorias["ZENTRIX"]["files"].append(file)
+                    tipos["ZENTRIX"].append(file)
                 else:
-                    categorias["ARO"]["files"].append(file)
+                    tipos["ARO"].append(file)
 
-        for cat_key, cat in categorias.items():
-            files = cat["files"]
+        # Labels limpios para los botones
+        labels_base = {
+            "ARO": "ARO",
+            "ZENTRIX": "ZENTRIX",
+            "ARO_SINRENOMBRAR": "ARO — Sin renombrar",
+            "ZENTRIX_SINRENOMBRAR": "ZENTRIX — Sin renombrar",
+        }
+
+        for tipo_key, files in tipos.items():
             if not files:
                 continue
 
-            zip_path = persist_dir / f"{cat_key}.zip"
+            # Nombre del ZIP: TIPO_PERIODO.zip (ej: ARO_Q05.zip)
+            if periodo_str:
+                zip_fname = f"{tipo_key}_{periodo_str}"
+            else:
+                zip_fname = tipo_key
+
+            zip_path = persist_dir / f"{zip_fname}.zip"
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 for file in files:
                     arcname = file.name
@@ -468,14 +494,21 @@ def procesar_todo(uploaded_files, csv_url, progress_bar, log):
                     zf.write(file, arcname)
 
             size_mb = zip_path.stat().st_size / (1024 * 1024)
-            zips_info[cat_key] = {
+            # Label del boton: "ARO — Q05 (247 archivos)"
+            label_base = labels_base[tipo_key]
+            if periodo_str:
+                label = f"{label_base} — {periodo_str}"
+            else:
+                label = label_base
+
+            zips_info[zip_fname] = {
                 "path": str(zip_path),
                 "count": len(files),
                 "size_mb": size_mb,
-                "label": cat["label"],
-                "sin_renombrar": cat["sin_renombrar"],
+                "label": label,
+                "sin_renombrar": "SINRENOMBRAR" in tipo_key,
             }
-            log(f"[OK] {cat['label']}: {len(files)} archivos ({size_mb:.1f} MB)")
+            log(f"[OK] {label}: {len(files)} archivos ({size_mb:.1f} MB)")
 
         log("[DONE] Proceso completado")
         progress_bar.progress(100, text="Listo!")
