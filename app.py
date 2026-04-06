@@ -32,6 +32,9 @@ DEFAULT_CSV_URL = (
 # Humand logo — loaded from repo file at startup
 LOGO_PATH = Path(__file__).parent / "humand_logo.svg"
 
+# Codigo de acceso
+ACCESS_CODE = "Assa2026"
+
 
 # ─── Funciones auxiliares ─────────────────────────────────────────
 def is_junk(p: Path) -> bool:
@@ -667,6 +670,29 @@ def inject_custom_css():
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
 
+    /* ── Login screen ── */
+    .login-container {
+        max-width: 400px;
+        margin: 80px auto 0 auto;
+        text-align: center;
+    }
+    .login-container img {
+        height: 56px;
+        border-radius: 10px;
+        margin-bottom: 24px;
+    }
+    .login-title {
+        font-size: 24px;
+        font-weight: 600;
+        color: #213478;
+        margin-bottom: 8px;
+    }
+    .login-subtitle {
+        font-size: 14px;
+        color: #636271;
+        margin-bottom: 32px;
+    }
+
     /* ── Section divider ── */
     .section-divider {
         height: 1px;
@@ -767,6 +793,31 @@ def mostrar_resultados():
         st.rerun()
 
 
+def mostrar_login():
+    """Pantalla de acceso con codigo."""
+    logo_b64 = ""
+    if LOGO_PATH.exists():
+        logo_b64 = base64.b64encode(LOGO_PATH.read_bytes()).decode()
+
+    st.markdown('<div class="login-container">', unsafe_allow_html=True)
+    if logo_b64:
+        st.markdown(f'<img src="data:image/svg+xml;base64,{logo_b64}" alt="Humand">', unsafe_allow_html=True)
+    st.markdown('<div class="login-title">Procesador de Recibos</div>', unsafe_allow_html=True)
+    st.markdown('<div class="login-subtitle">Ingresa el codigo de acceso para continuar</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        code = st.text_input("Codigo de acceso", type="password", label_visibility="collapsed",
+                              placeholder="Codigo de acceso")
+        if st.button("Ingresar", type="primary", use_container_width=True):
+            if code == ACCESS_CODE:
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Codigo incorrecto")
+
+
 def main():
     st.set_page_config(
         page_title="Recibos | Humand",
@@ -776,6 +827,11 @@ def main():
     )
 
     inject_custom_css()
+
+    # ── Verificar acceso ──
+    if not st.session_state.get("authenticated"):
+        mostrar_login()
+        return
 
     # ── Header con logo ──
     logo_b64 = ""
