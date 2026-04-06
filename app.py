@@ -408,37 +408,43 @@ def procesar_todo(uploaded_files, csv_url, simulacion, progress_bar, log):
 
         progress_bar.progress(85, text="Generando ZIPs de salida...")
 
-        # 7. Crear 4 ZIPs separados por categoría
+        # 7. Crear 4 ZIPs separados y guardarlos en /tmp para persistencia
         categorias = {
-            "ZENTRIX": {"filtro": lambda rel: "ZENTRIX" in str(rel).upper() and "SINRENOMBRAR" not in str(rel).upper()},
-            "ARO": {"filtro": lambda rel: "/ARO/" in ("/" + str(rel).upper() + "/") and "SINRENOMBRAR" not in str(rel).upper()},
-            "ZENTRIX_SINRENOMBRAR": {"filtro": lambda rel: "SINRENOMBRAR" in str(rel).upper() and ("ZTX" in str(rel).upper() or "ZENTRIX" in str(rel).upper())},
-            "ARO_SINRENOMBRAR": {"filtro": lambda rel: "SINRENOMBRAR" in str(rel).upper() and "ARO" in str(rel).upper()},
+            "ZENTRIX": lambda rel: "ZENTRIX" in str(rel).upper() and "SINRENOMBRAR" not in str(rel).upper(),
+            "ARO": lambda rel: "/ARO/" in ("/" + str(rel).upper() + "/") and "SINRENOMBRAR" not in str(rel).upper(),
+            "ZENTRIX_SINRENOMBRAR": lambda rel: "SINRENOMBRAR" in str(rel).upper() and ("ZTX" in str(rel).upper() or "ZENTRIX" in str(rel).upper()),
+            "ARO_SINRENOMBRAR": lambda rel: "SINRENOMBRAR" in str(rel).upper() and "ARO" in str(rel).upper(),
         }
 
-        zips = {}
+        # Guardar en /tmp (persiste entre reruns de Streamlit)
+        persist_dir = Path("/tmp/recibos_resultado")
+        if persist_dir.exists():
+            shutil.rmtree(persist_dir)
+        safe_mkdir(persist_dir)
+
+        zips_info = {}
         all_pdfs = list(output_dir.rglob("*.pdf"))
 
-        for cat_name, cat_info in categorias.items():
-            zip_path = tmp / f"{cat_name}.zip"
+        for cat_name, filtro in categorias.items():
+            zip_path = persist_dir / f"{cat_name}.zip"
             count = 0
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 for file in all_pdfs:
                     rel = file.relative_to(output_dir)
-                    if cat_info["filtro"](rel):
+                    if filtro(rel):
                         zf.write(file, rel)
                         count += 1
 
             if count > 0:
-                zip_bytes = zip_path.read_bytes()
-                size_mb = len(zip_bytes) / (1024 * 1024)
-                zips[cat_name] = {
-                    "bytes": zip_bytes,
+                size_mb = zip_path.stat().st_size / (1024 * 1024)
+                zips_info[cat_name] = {
+                    "path": str(zip_path),
                     "count": count,
                     "size_mb": size_mb,
                 }
                 log(f"[OK] {cat_name}: {count} archivos ({size_mb:.1f} MB)")
             else:
+                zip_path.unlink(missing_ok=True)
                 log(f"[INFO] {cat_name}: 0 archivos")
 
         log("[DONE] Proceso completado")
@@ -451,10 +457,71 @@ def procesar_todo(uploaded_files, csv_url, simulacion, progress_bar, log):
             **rename_stats,
         }
 
-        return {"zips": zips, "stats": final_stats}
+        return {"zips_info": zips_info, "stats": final_stats}
 
 
 # ─── Interfaz Streamlit ──────────────────────────────────────────
+
+# Labels para botones de descarga
+DOWNLOAD_LABELS = {
+    "ZENTRIX": ("ZENTRIX (renombrados)", "primary"),
+    "ARO": ("ARO (renombrados)", "primary"),
+    "ZENTRIX_SINRENOMBRAR": ("ZENTRIX sin renombrar", "secondary"),
+    "ARO_SINRENOMBRAR": ("ARO sin renombrar", "secondary"),
+}
+
+
+def mostrar_resultados():
+    """Muestra estadísticas y botones de descarga desde session_state."""
+    stats = st.session_state.get("resultado_stats")
+    zips_info = st.session_state.get("resultado_zips_info")
+
+    if not stats or not zips_info:
+        return
+
+    st.markdown("---")
+    st.success("Proceso completado!")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("PDFs encontrados", stats.get("pdfs_encontrados", 0))
+    with col2:
+        st.metric("Renombrados", stats.get("renombrados", 0))
+    with col3:
+        st.metric("Sin renombrar", stats.get("sin_renombrar", 0))
+
+    st.markdown("---")
+    st.markdown("### Descargas")
+    st.caption("Podes descargar todos — cada boton funciona de forma independiente.")
+
+    for cat_name, (label, btn_type) in DOWNLOAD_LABELS.items():
+        if cat_name in zips_info:
+            z = zips_info[cat_name]
+            zip_path = Path(z["path"])
+            if zip_path.exists():
+                zip_bytes = zip_path.read_bytes()
+                st.download_button(
+                    label=f"{label}  —  {z['count']} archivos  ({z['size_mb']:.0f} MB)",
+                    data=zip_bytes,
+                    file_name=f"{cat_name.lower()}.zip",
+                    mime="application/zip",
+                    type=btn_type,
+                    use_container_width=True,
+                    key=f"download_{cat_name}",
+                )
+            else:
+                st.warning(f"{label}: archivo no disponible (sesion expirada)")
+
+    if not zips_info:
+        st.warning("No se generaron archivos para descargar.")
+
+    if st.button("Procesar nuevos archivos", use_container_width=True):
+        st.session_state.pop("resultado_stats", None)
+        st.session_state.pop("resultado_zips_info", None)
+        st.session_state.pop("resultado_logs", None)
+        st.rerun()
+
+
 def main():
     st.set_page_config(
         page_title="Procesador de Recibos",
@@ -464,7 +531,7 @@ def main():
 
     with st.sidebar:
         st.markdown("### Procesador de Recibos")
-        st.caption("v2.2")
+        st.caption("v2.3")
         st.divider()
 
         modo = st.selectbox("Modo", ["Real (renombra archivos)", "Simulacion (solo preview)"])
@@ -486,6 +553,16 @@ def main():
     st.title("Procesador de Recibos")
     st.caption("Extrae, clasifica y renombra PDFs automaticamente")
 
+    # Si ya hay resultados en session_state, mostrarlos directamente
+    if "resultado_zips_info" in st.session_state:
+        # Mostrar logs del procesamiento anterior
+        saved_logs = st.session_state.get("resultado_logs", [])
+        if saved_logs:
+            with st.expander("Ver log del procesamiento", expanded=False):
+                st.code("\n".join(saved_logs), language="bash")
+        mostrar_resultados()
+        return
+
     # Upload
     st.markdown("#### Subi los archivos")
     uploaded_files = st.file_uploader(
@@ -501,77 +578,39 @@ def main():
             size_mb = f.size / (1024 * 1024)
             st.text(f"  {f.name}  ({size_mb:.1f} MB)")
 
-    # Contenedor para resultados (se mantiene visible)
-    resultado = st.container()
-
     if st.button("Procesar archivos", type="primary", disabled=not uploaded_files,
                   use_container_width=True):
 
-        with resultado:
-            st.markdown("---")
-            st.markdown("#### Procesando...")
+        st.markdown("---")
+        st.markdown("#### Procesando...")
 
-            progress_bar = st.progress(0, text="Iniciando...")
-            log_container = st.empty()
-            logs = []
+        progress_bar = st.progress(0, text="Iniciando...")
+        log_container = st.empty()
+        logs = []
 
-            def log(msg):
-                logs.append(msg)
-                log_container.code("\n".join(logs), language="bash")
+        def log(msg):
+            logs.append(msg)
+            log_container.code("\n".join(logs), language="bash")
 
-            try:
-                result = procesar_todo(
-                    uploaded_files, csv_url, simulacion, progress_bar, log
-                )
-            except Exception as e:
-                st.error(f"ERROR: {e}")
-                st.code("\n".join(logs), language="bash")
-                result = None
+        try:
+            result = procesar_todo(
+                uploaded_files, csv_url, simulacion, progress_bar, log
+            )
+        except Exception as e:
+            st.error(f"ERROR: {e}")
+            st.code("\n".join(logs), language="bash")
+            result = None
 
-            if result and result.get("zips"):
-                stats = result["stats"]
-                zips = result["zips"]
-
-                st.markdown("---")
-                st.success("Proceso completado!")
-
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("PDFs encontrados", stats.get("pdfs_encontrados", 0))
-                with col2:
-                    st.metric("Renombrados", stats.get("renombrados", 0))
-                with col3:
-                    st.metric("Sin renombrar", stats.get("sin_renombrar", 0))
-
-                st.markdown("---")
-                st.markdown("### Descargas")
-
-                # Botones de descarga para cada categoría
-                labels = {
-                    "ZENTRIX": ("ZENTRIX (renombrados)", "primary"),
-                    "ARO": ("ARO (renombrados)", "primary"),
-                    "ZENTRIX_SINRENOMBRAR": ("ZENTRIX sin renombrar", "secondary"),
-                    "ARO_SINRENOMBRAR": ("ARO sin renombrar", "secondary"),
-                }
-
-                for cat_name, (label, btn_type) in labels.items():
-                    if cat_name in zips:
-                        z = zips[cat_name]
-                        st.download_button(
-                            label=f"{label}  —  {z['count']} archivos  ({z['size_mb']:.0f} MB)",
-                            data=z["bytes"],
-                            file_name=f"{cat_name.lower()}.zip",
-                            mime="application/zip",
-                            type=btn_type,
-                            use_container_width=True,
-                            key=f"download_{cat_name}",
-                        )
-
-                if not zips:
-                    st.warning("No se generaron archivos para descargar.")
-
-            else:
-                st.warning("No se encontraron PDFs para procesar.")
+        if result and result.get("zips_info"):
+            # Guardar en session_state y rerun para mostrar botones persistentes
+            st.session_state["resultado_stats"] = result["stats"]
+            st.session_state["resultado_zips_info"] = result["zips_info"]
+            st.session_state["resultado_logs"] = logs
+            st.rerun()
+        elif result is None:
+            st.warning("No se encontraron PDFs para procesar.")
+        else:
+            st.warning("No se generaron archivos para descargar.")
 
 
 if __name__ == "__main__":
