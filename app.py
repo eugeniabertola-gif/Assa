@@ -366,7 +366,7 @@ def procesar_todo(uploaded_files, csv_url, simulacion, progress_bar, log):
 
         if not pdfs:
             log("[WARN] No se encontraron PDFs para procesar")
-            return None, {}
+            return None
 
         # 4. Clasificar en periodos + ARO / ZENTRIX
         log("[INFO] Clasificando PDFs por periodo y tamano...")
@@ -408,31 +408,38 @@ def procesar_todo(uploaded_files, csv_url, simulacion, progress_bar, log):
 
         progress_bar.progress(85, text="Generando ZIPs de salida...")
 
-        # 7. Crear DOS ZIPs: renombrados y sin renombrar
-        zip_renombrados = tmp / "renombrados.zip"
-        zip_sin_renombrar = tmp / "sin_renombrar.zip"
-        count_ren = 0
-        count_sin = 0
+        # 7. Crear 4 ZIPs separados por categoría
+        categorias = {
+            "ZENTRIX": {"filtro": lambda rel: "ZENTRIX" in str(rel).upper() and "SINRENOMBRAR" not in str(rel).upper()},
+            "ARO": {"filtro": lambda rel: "/ARO/" in ("/" + str(rel).upper() + "/") and "SINRENOMBRAR" not in str(rel).upper()},
+            "ZENTRIX_SINRENOMBRAR": {"filtro": lambda rel: "SINRENOMBRAR" in str(rel).upper() and ("ZTX" in str(rel).upper() or "ZENTRIX" in str(rel).upper())},
+            "ARO_SINRENOMBRAR": {"filtro": lambda rel: "SINRENOMBRAR" in str(rel).upper() and "ARO" in str(rel).upper()},
+        }
 
-        log("[INFO] Empaquetando archivos renombrados...")
-        with zipfile.ZipFile(zip_renombrados, "w", zipfile.ZIP_DEFLATED) as zf:
-            for file in output_dir.rglob("*.pdf"):
-                rel = file.relative_to(output_dir)
-                if "SINRENOMBRAR" not in str(rel).upper():
-                    zf.write(file, rel)
-                    count_ren += 1
+        zips = {}
+        all_pdfs = list(output_dir.rglob("*.pdf"))
 
-        log(f"[OK] {count_ren} archivos en renombrados.zip ({zip_renombrados.stat().st_size / (1024*1024):.1f} MB)")
+        for cat_name, cat_info in categorias.items():
+            zip_path = tmp / f"{cat_name}.zip"
+            count = 0
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for file in all_pdfs:
+                    rel = file.relative_to(output_dir)
+                    if cat_info["filtro"](rel):
+                        zf.write(file, rel)
+                        count += 1
 
-        log("[INFO] Empaquetando archivos sin renombrar...")
-        with zipfile.ZipFile(zip_sin_renombrar, "w", zipfile.ZIP_DEFLATED) as zf:
-            for file in output_dir.rglob("*.pdf"):
-                rel = file.relative_to(output_dir)
-                if "SINRENOMBRAR" in str(rel).upper():
-                    zf.write(file, rel)
-                    count_sin += 1
-
-        log(f"[OK] {count_sin} archivos en sin_renombrar.zip ({zip_sin_renombrar.stat().st_size / (1024*1024):.1f} MB)")
+            if count > 0:
+                zip_bytes = zip_path.read_bytes()
+                size_mb = len(zip_bytes) / (1024 * 1024)
+                zips[cat_name] = {
+                    "bytes": zip_bytes,
+                    "count": count,
+                    "size_mb": size_mb,
+                }
+                log(f"[OK] {cat_name}: {count} archivos ({size_mb:.1f} MB)")
+            else:
+                log(f"[INFO] {cat_name}: 0 archivos")
 
         log("[DONE] Proceso completado")
         progress_bar.progress(100, text="Listo!")
@@ -444,15 +451,7 @@ def procesar_todo(uploaded_files, csv_url, simulacion, progress_bar, log):
             **rename_stats,
         }
 
-        result = {
-            "zip_renombrados": zip_renombrados.read_bytes() if count_ren > 0 else None,
-            "zip_sin_renombrar": zip_sin_renombrar.read_bytes() if count_sin > 0 else None,
-            "stats": final_stats,
-            "count_ren": count_ren,
-            "count_sin": count_sin,
-        }
-
-        return result
+        return {"zips": zips, "stats": final_stats}
 
 
 # ─── Interfaz Streamlit ──────────────────────────────────────────
@@ -520,12 +519,18 @@ def main():
                 logs.append(msg)
                 log_container.code("\n".join(logs), language="bash")
 
-            result = procesar_todo(
-                uploaded_files, csv_url, simulacion, progress_bar, log
-            )
+            try:
+                result = procesar_todo(
+                    uploaded_files, csv_url, simulacion, progress_bar, log
+                )
+            except Exception as e:
+                st.error(f"ERROR: {e}")
+                st.code("\n".join(logs), language="bash")
+                result = None
 
-            if result:
+            if result and result.get("zips"):
                 stats = result["stats"]
+                zips = result["zips"]
 
                 st.markdown("---")
                 st.success("Proceso completado!")
@@ -538,39 +543,31 @@ def main():
                 with col3:
                     st.metric("Sin renombrar", stats.get("sin_renombrar", 0))
 
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    st.metric("ARO", stats.get("aro", 0))
-                with col_b:
-                    st.metric("ZENTRIX", stats.get("zentrix", 0))
-
                 st.markdown("---")
                 st.markdown("### Descargas")
 
-                if result["zip_renombrados"]:
-                    size_ren = len(result["zip_renombrados"]) / (1024*1024)
-                    st.download_button(
-                        label=f"DESCARGAR ARCHIVOS RENOMBRADOS ({result['count_ren']} archivos, {size_ren:.0f} MB)",
-                        data=result["zip_renombrados"],
-                        file_name="recibos_renombrados.zip",
-                        mime="application/zip",
-                        type="primary",
-                        use_container_width=True,
-                        key="download_renombrados",
-                    )
+                # Botones de descarga para cada categoría
+                labels = {
+                    "ZENTRIX": ("ZENTRIX (renombrados)", "primary"),
+                    "ARO": ("ARO (renombrados)", "primary"),
+                    "ZENTRIX_SINRENOMBRAR": ("ZENTRIX sin renombrar", "secondary"),
+                    "ARO_SINRENOMBRAR": ("ARO sin renombrar", "secondary"),
+                }
 
-                if result["zip_sin_renombrar"]:
-                    size_sin = len(result["zip_sin_renombrar"]) / (1024*1024)
-                    st.download_button(
-                        label=f"DESCARGAR SIN RENOMBRAR ({result['count_sin']} archivos, {size_sin:.0f} MB)",
-                        data=result["zip_sin_renombrar"],
-                        file_name="recibos_sin_renombrar.zip",
-                        mime="application/zip",
-                        use_container_width=True,
-                        key="download_sin_renombrar",
-                    )
+                for cat_name, (label, btn_type) in labels.items():
+                    if cat_name in zips:
+                        z = zips[cat_name]
+                        st.download_button(
+                            label=f"{label}  —  {z['count']} archivos  ({z['size_mb']:.0f} MB)",
+                            data=z["bytes"],
+                            file_name=f"{cat_name.lower()}.zip",
+                            mime="application/zip",
+                            type=btn_type,
+                            use_container_width=True,
+                            key=f"download_{cat_name}",
+                        )
 
-                if not result["zip_renombrados"] and not result["zip_sin_renombrar"]:
+                if not zips:
                     st.warning("No se generaron archivos para descargar.")
 
             else:
