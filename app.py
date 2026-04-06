@@ -411,9 +411,8 @@ def procesar_todo(uploaded_files, csv_url, progress_bar, log):
 
         progress_bar.progress(85, text="Generando ZIPs de salida...")
 
-        # 7. Crear 4 ZIPs: ARO, ARO_SINRENOMBRAR, ZENTRIX, ZENTRIX_SINRENOMBRAR
-        # Archivos planos (sin subcarpetas). Periodo en el nombre del ZIP.
-        # Guardar en /tmp (persiste entre reruns de Streamlit)
+        # 7. Crear 4 ZIPs simples: ARO, ZENTRIX, ARO sin renombrar, ZENTRIX sin renombrar
+        # Archivos planos dentro de cada ZIP (sin subcarpetas)
         persist_dir = Path("/tmp/recibos_resultado")
         if persist_dir.exists():
             shutil.rmtree(persist_dir)
@@ -422,92 +421,61 @@ def procesar_todo(uploaded_files, csv_url, progress_bar, log):
         zips_info = {}
         all_pdfs = list(output_dir.rglob("*.pdf"))
 
-        # Detectar periodos reales (no GENERAL)
-        periodos_reales = set()
+        # 4 categorias fijas
+        categorias = {
+            "ARO": {"label": "ARO", "sin_renombrar": False, "files": []},
+            "ZENTRIX": {"label": "ZENTRIX", "sin_renombrar": False, "files": []},
+            "ARO_SINRENOMBRAR": {"label": "ARO — Sin renombrar", "sin_renombrar": True, "files": []},
+            "ZENTRIX_SINRENOMBRAR": {"label": "ZENTRIX — Sin renombrar", "sin_renombrar": True, "files": []},
+        }
+
         for file in all_pdfs:
-            parts = file.relative_to(output_dir).parts
-            if len(parts) > 1:
-                p = parts[0]
-                if p.upper() != "GENERAL":
-                    periodos_reales.add(p)
+            rel_upper = str(file.relative_to(output_dir)).upper()
+            is_sin_ren = "SINRENOMBRAR" in rel_upper
 
-        # Si hay un solo periodo, usarlo para el nombre del ZIP
-        # Si hay varios, incluir el periodo en el nombre
-        # Si no hay periodo detectado, no poner sufijo
-        periodo_unico = list(periodos_reales)[0] if len(periodos_reales) == 1 else None
-
-        # Agrupar PDFs por tipo (4 categorias)
-        groups = {}  # key: tipo -> list of pdf paths
-        for file in all_pdfs:
-            rel = str(file.relative_to(output_dir))
-            rel_upper = rel.upper()
-
-            # Detectar tipo
-            is_sinrenombrar = "SINRENOMBRAR" in rel_upper
-            if is_sinrenombrar:
+            if is_sin_ren:
                 if "ZTX" in rel_upper or "ZENTRIX" in rel_upper:
-                    tipo = "ZENTRIX_SINRENOMBRAR"
-                elif "ARO" in rel_upper:
-                    tipo = "ARO_SINRENOMBRAR"
+                    categorias["ZENTRIX_SINRENOMBRAR"]["files"].append(file)
                 else:
-                    tipo = "ARO_SINRENOMBRAR"  # fallback
+                    categorias["ARO_SINRENOMBRAR"]["files"].append(file)
             elif "ZENTRIX" in rel_upper:
-                tipo = "ZENTRIX"
+                categorias["ZENTRIX"]["files"].append(file)
             elif "/ARO/" in ("/" + rel_upper + "/") or rel_upper.startswith("ARO/"):
-                tipo = "ARO"
+                categorias["ARO"]["files"].append(file)
             else:
-                tipo = "ZENTRIX"  # fallback: archivos grandes
+                # Fallback por tamano
+                if file.stat().st_size > SIZE_THRESHOLD:
+                    categorias["ZENTRIX"]["files"].append(file)
+                else:
+                    categorias["ARO"]["files"].append(file)
 
-            if tipo not in groups:
-                groups[tipo] = []
-            groups[tipo].append(file)
+        for cat_key, cat in categorias.items():
+            files = cat["files"]
+            if not files:
+                continue
 
-        # Crear un ZIP por tipo, archivos planos
-        for tipo, files in sorted(groups.items()):
-            # Nombre: TIPO_PERIODO o solo TIPO
-            if periodo_unico:
-                zip_name = f"{tipo}_{periodo_unico}"
-            elif len(periodos_reales) > 1:
-                # Multiples periodos: listarlos
-                ps = "_".join(sorted(periodos_reales))
-                zip_name = f"{tipo}_{ps}"
-            else:
-                zip_name = tipo
-
-            zip_path = persist_dir / f"{zip_name}.zip"
-            count = 0
+            zip_path = persist_dir / f"{cat_key}.zip"
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 for file in files:
-                    # Archivo plano: solo el nombre, sin subcarpetas
                     arcname = file.name
-                    # Evitar duplicados en el ZIP
                     existing = set(zf.namelist())
                     if arcname in existing:
-                        base, ext = os.path.splitext(arcname)
+                        base_n, ext_n = os.path.splitext(arcname)
                         i = 1
-                        while f"{base}_{i}{ext}" in existing:
+                        while f"{base_n}_{i}{ext_n}" in existing:
                             i += 1
-                        arcname = f"{base}_{i}{ext}"
+                        arcname = f"{base_n}_{i}{ext_n}"
                     zf.write(file, arcname)
-                    count += 1
 
-            if count > 0:
-                size_mb = zip_path.stat().st_size / (1024 * 1024)
-                # Label legible para el boton
-                tipo_label = tipo.replace("_SINRENOMBRAR", "")
-                es_sin_ren = "SINRENOMBRAR" in tipo
-                zips_info[zip_name] = {
-                    "path": str(zip_path),
-                    "count": count,
-                    "size_mb": size_mb,
-                    "tipo": tipo,
-                    "tipo_label": tipo_label,
-                    "periodo": periodo_unico or ", ".join(sorted(periodos_reales)) or "",
-                    "sin_renombrar": es_sin_ren,
-                }
-                log(f"[OK] {zip_name}: {count} archivos ({size_mb:.1f} MB)")
-            else:
-                zip_path.unlink(missing_ok=True)
+            size_mb = zip_path.stat().st_size / (1024 * 1024)
+            zips_info[cat_key] = {
+                "path": str(zip_path),
+                "count": len(files),
+                "size_mb": size_mb,
+                "label": cat["label"],
+                "sin_renombrar": cat["sin_renombrar"],
+            }
+            log(f"[OK] {cat['label']}: {len(files)} archivos ({size_mb:.1f} MB)")
 
         log("[DONE] Proceso completado")
         progress_bar.progress(100, text="Listo!")
@@ -713,45 +681,37 @@ def mostrar_resultados():
 
     # Mostrar renombrados
     if renombrados:
-        cols = st.columns(min(len(renombrados), 2))
+        cols = st.columns(2)
         for i, (zip_name, z) in enumerate(sorted(renombrados.items())):
             zip_path = Path(z["path"])
-            with cols[i % len(cols)]:
+            with cols[i % 2]:
                 if zip_path.exists():
-                    zip_bytes = zip_path.read_bytes()
-                    periodo_txt = f"  —  {z['periodo']}" if z.get("periodo") else ""
                     st.download_button(
-                        label=f"{z['tipo_label']}{periodo_txt}  ({z['count']} archivos)",
-                        data=zip_bytes,
+                        label=f"{z['label']}  ({z['count']} archivos)",
+                        data=zip_path.read_bytes(),
                         file_name=f"{zip_name}.zip",
                         mime="application/zip",
                         use_container_width=True,
                         key=f"dl_{zip_name}",
                     )
-                else:
-                    st.warning(f"{zip_name}: sesion expirada")
 
     # Mostrar sin renombrar
     if sin_renombrar:
         st.markdown("")
         st.caption("Sin renombrar")
-        cols2 = st.columns(min(len(sin_renombrar), 2))
+        cols2 = st.columns(2)
         for i, (zip_name, z) in enumerate(sorted(sin_renombrar.items())):
             zip_path = Path(z["path"])
-            with cols2[i % len(cols2)]:
+            with cols2[i % 2]:
                 if zip_path.exists():
-                    zip_bytes = zip_path.read_bytes()
-                    periodo_txt = f"  —  {z['periodo']}" if z.get("periodo") else ""
                     st.download_button(
-                        label=f"{z['tipo_label']}{periodo_txt}  ({z['count']} archivos)",
-                        data=zip_bytes,
+                        label=f"{z['label']}  ({z['count']} archivos)",
+                        data=zip_path.read_bytes(),
                         file_name=f"{zip_name}.zip",
                         mime="application/zip",
                         use_container_width=True,
                         key=f"dl_{zip_name}",
                     )
-                else:
-                    st.warning(f"{zip_name}: sesion expirada")
 
     if not zips_info:
         st.warning("No se generaron archivos para descargar.")
