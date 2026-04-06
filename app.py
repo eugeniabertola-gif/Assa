@@ -436,9 +436,19 @@ def main():
         layout="wide",
     )
 
+    # Inicializar session_state para guardar resultados
+    if "zip_bytes" not in st.session_state:
+        st.session_state.zip_bytes = None
+    if "stats" not in st.session_state:
+        st.session_state.stats = None
+    if "logs" not in st.session_state:
+        st.session_state.logs = None
+    if "procesado" not in st.session_state:
+        st.session_state.procesado = False
+
     with st.sidebar:
         st.markdown("### Procesador de Recibos")
-        st.caption("v2.0")
+        st.caption("v2.1")
         st.divider()
 
         modo = st.selectbox("Modo", ["Real (renombra archivos)", "Simulacion (solo preview)"])
@@ -457,9 +467,54 @@ def main():
             "`ARO_SEM39_SINRENOMBRAR/`"
         )
 
+        if st.session_state.procesado:
+            st.divider()
+            if st.button("Limpiar y empezar de nuevo"):
+                st.session_state.zip_bytes = None
+                st.session_state.stats = None
+                st.session_state.logs = None
+                st.session_state.procesado = False
+                st.rerun()
+
     st.title("Procesador de Recibos")
     st.caption("Extrae, clasifica y renombra PDFs automaticamente")
 
+    # Si ya hay resultado, mostrarlo directamente
+    if st.session_state.procesado and st.session_state.zip_bytes:
+        stats = st.session_state.stats
+
+        st.success("Proceso completado!")
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("PDFs encontrados", stats.get("pdfs_encontrados", 0))
+        with col2:
+            st.metric("Renombrados", stats.get("renombrados", 0))
+        with col3:
+            st.metric("Sin renombrar", stats.get("sin_renombrar", 0))
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.metric("ARO", stats.get("aro", 0))
+        with col_b:
+            st.metric("ZENTRIX", stats.get("zentrix", 0))
+
+        st.download_button(
+            label="Descargar resultado (.zip)",
+            data=st.session_state.zip_bytes,
+            file_name="recibos_procesados.zip",
+            mime="application/zip",
+            type="primary",
+            use_container_width=True,
+        )
+
+        if st.session_state.logs:
+            with st.expander("Ver log del proceso"):
+                st.code("\n".join(st.session_state.logs), language="bash")
+
+        return
+
+    # Upload
     st.markdown("#### Subi los archivos")
     uploaded_files = st.file_uploader(
         "Arrastra archivos aca o hace click para seleccionar",
@@ -493,31 +548,12 @@ def main():
         )
 
         if zip_bytes:
-            st.markdown("---")
-            st.success("Proceso completado!")
-
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("PDFs encontrados", stats.get("pdfs_encontrados", 0))
-            with col2:
-                st.metric("Renombrados", stats.get("renombrados", 0))
-            with col3:
-                st.metric("Sin renombrar", stats.get("sin_renombrar", 0))
-
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.metric("ARO", stats.get("aro", 0))
-            with col_b:
-                st.metric("ZENTRIX", stats.get("zentrix", 0))
-
-            st.download_button(
-                label="Descargar resultado (.zip)",
-                data=zip_bytes,
-                file_name="recibos_procesados.zip",
-                mime="application/zip",
-                type="primary",
-                use_container_width=True,
-            )
+            # Guardar en session_state para que sobreviva recarga
+            st.session_state.zip_bytes = zip_bytes
+            st.session_state.stats = stats
+            st.session_state.logs = logs
+            st.session_state.procesado = True
+            st.rerun()
         else:
             st.warning("No se encontraron PDFs para procesar.")
 
