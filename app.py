@@ -70,30 +70,46 @@ def extract_rfc(pdf_path: Path, x: float, y: float, width=150, height=30) -> str
 
 
 # ─── Extracción de archivos ───────────────────────────────────────
-def extract_rar(rar_path: Path, dest_dir: Path) -> bool:
-    """Extrae RAR usando múltiples métodos (unrar-free, 7z, unar, rarfile)."""
+def extract_rar(rar_path: Path, dest_dir: Path, log=None) -> bool:
+    """Extrae RAR usando múltiples métodos. Prioriza unar (igual que en Mac)."""
     tools = [
-        ["unrar-free", "-x", str(rar_path), str(dest_dir) + "/"],
-        ["unrar", "x", "-o+", str(rar_path), str(dest_dir) + "/"],
-        ["7z", "x", "-y", f"-o{dest_dir}", str(rar_path)],
-        ["unar", "-force-overwrite", "-no-directory", "-output-directory", str(dest_dir), str(rar_path)],
+        ("unar", ["unar", "-force-overwrite", "-no-directory", "-output-directory", str(dest_dir), str(rar_path)]),
+        ("7z", ["7z", "x", "-y", f"-o{dest_dir}", str(rar_path)]),
+        ("unrar", ["unrar", "x", "-o+", str(rar_path), str(dest_dir) + "/"]),
+        ("unrar-free", ["unrar-free", "-x", str(rar_path), str(dest_dir) + "/"]),
     ]
-    for cmd in tools:
+    errors = []
+    for name, cmd in tools:
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, timeout=120)
             if result.returncode == 0:
+                if log:
+                    log(f"    (extraido con {name})")
                 return True
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
+            else:
+                stderr = result.stderr.decode("utf-8", errors="replace")[:100]
+                errors.append(f"{name}: exit {result.returncode} - {stderr}")
+        except FileNotFoundError:
+            errors.append(f"{name}: no instalado")
+        except subprocess.TimeoutExpired:
+            errors.append(f"{name}: timeout")
 
     # Fallback: rarfile de Python
     try:
         import rarfile
+        rarfile.UNRAR_TOOL = "unrar"
         with rarfile.RarFile(str(rar_path), "r") as rf:
             rf.extractall(str(dest_dir))
+        if log:
+            log(f"    (extraido con rarfile python)")
         return True
-    except Exception:
-        return False
+    except Exception as e:
+        errors.append(f"rarfile: {e}")
+
+    if log:
+        for err in errors:
+            log(f"    [DEBUG] {err}")
+    return False
 
 
 def extract_archives(work_dir: Path, log):
@@ -120,7 +136,7 @@ def extract_archives(work_dir: Path, log):
                     log(f"[WARN] ZIP invalido: {p.name}")
 
             elif suf == ".rar":
-                if extract_rar(p, p.parent):
+                if extract_rar(p, p.parent, log=log):
                     p.unlink(missing_ok=True)
                     extracted_any = True
                     total += 1
