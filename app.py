@@ -1,9 +1,10 @@
 """
-Procesador de Recibos — Streamlit Cloud App v2.0
+Procesador de Recibos — Streamlit Cloud App v3.0
 Combina PASO_1 (extraer + clasificar) y PASO_2 (renombrar con CSV)
 """
 from __future__ import annotations
 
+import base64
 import csv
 import io
 import os
@@ -18,7 +19,7 @@ import fitz  # PyMuPDF
 import streamlit as st
 import urllib.request
 
-# ─── Configuración ───────────────────────────────────────────────
+# ─── Configuracion ───────────────────────────────────────────────
 MAC_JUNK = {".DS_Store"}
 SIZE_THRESHOLD = 15 * 1024  # 15 KB
 RFC_ALNUM_RE = re.compile(r"^[A-Z0-9]{12,13}$")
@@ -27,6 +28,9 @@ DEFAULT_CSV_URL = (
     "https://redash.humand.co/api/queries/28431/results.csv"
     "?api_key=2TcfZFwFRwpSxupg7vV3US5KZonBdgIlMLmvcDSX"
 )
+
+# Humand logo — loaded from repo file at startup
+LOGO_PATH = Path(__file__).parent / "humand_logo.svg"
 
 
 # ─── Funciones auxiliares ─────────────────────────────────────────
@@ -69,9 +73,9 @@ def extract_rfc(pdf_path: Path, x: float, y: float, width=150, height=30) -> str
         return None
 
 
-# ─── Extracción de archivos ───────────────────────────────────────
+# ─── Extraccion de archivos ───────────────────────────────────────
 def extract_rar(rar_path: Path, dest_dir: Path, log=None) -> bool:
-    """Extrae RAR usando múltiples métodos. Prioriza unar (igual que en Mac)."""
+    """Extrae RAR usando multiples metodos. Prioriza unar (igual que en Mac)."""
     tools = [
         ("unar", ["unar", "-force-overwrite", "-no-directory", "-output-directory", str(dest_dir), str(rar_path)]),
         ("7z", ["7z", "x", "-y", f"-o{dest_dir}", str(rar_path)]),
@@ -147,7 +151,7 @@ def extract_archives(work_dir: Path, log):
     return total
 
 
-# ─── Recolección y clasificación ──────────────────────────────────
+# ─── Recoleccion y clasificacion ──────────────────────────────────
 def collect_pdfs_and_delete_xml(from_dir: Path) -> list[Path]:
     pdfs = []
     for p in from_dir.rglob("*"):
@@ -194,6 +198,7 @@ def classify_pdfs_by_period(pdfs: list[Path], output_dir: Path, log) -> dict:
         dest = nombre_unico(dest_dir / src.name)
         shutil.copy2(src, dest)
 
+    stats["periodos_set"] = stats["periodos"].copy()
     stats["periodos"] = len(stats["periodos"])
     return stats
 
@@ -337,7 +342,7 @@ def renombrar_con_csv(root_dir: Path, mapa: dict, log) -> dict:
 
 
 # ─── Proceso completo ─────────────────────────────────────────────
-def procesar_todo(uploaded_files, csv_url, simulacion, progress_bar, log):
+def procesar_todo(uploaded_files, csv_url, progress_bar, log):
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         input_dir = tmp / "input"
@@ -397,25 +402,16 @@ def procesar_todo(uploaded_files, csv_url, simulacion, progress_bar, log):
 
         progress_bar.progress(75, text="CSV descargado")
 
-        if mapa and not simulacion:
+        if mapa:
             log("[INFO] Renombrando con nomenclatura final...")
             rename_stats = renombrar_con_csv(output_dir, mapa, log)
         else:
             rename_stats = {"renombrados": 0, "sin_renombrar": 0, "ignorados": 0,
                            "total": class_stats["aro"] + class_stats["zentrix"]}
-            if simulacion:
-                log("[INFO] SIMULACION: no se renombro nada")
 
         progress_bar.progress(85, text="Generando ZIPs de salida...")
 
-        # 7. Crear 4 ZIPs separados y guardarlos en /tmp para persistencia
-        categorias = {
-            "ZENTRIX": lambda rel: "ZENTRIX" in str(rel).upper() and "SINRENOMBRAR" not in str(rel).upper(),
-            "ARO": lambda rel: "/ARO/" in ("/" + str(rel).upper() + "/") and "SINRENOMBRAR" not in str(rel).upper(),
-            "ZENTRIX_SINRENOMBRAR": lambda rel: "SINRENOMBRAR" in str(rel).upper() and ("ZTX" in str(rel).upper() or "ZENTRIX" in str(rel).upper()),
-            "ARO_SINRENOMBRAR": lambda rel: "SINRENOMBRAR" in str(rel).upper() and "ARO" in str(rel).upper(),
-        }
-
+        # 7. Crear ZIPs por periodo+categoria, archivos PLANOS (sin carpetas)
         # Guardar en /tmp (persiste entre reruns de Streamlit)
         persist_dir = Path("/tmp/recibos_resultado")
         if persist_dir.exists():
@@ -425,27 +421,60 @@ def procesar_todo(uploaded_files, csv_url, simulacion, progress_bar, log):
         zips_info = {}
         all_pdfs = list(output_dir.rglob("*.pdf"))
 
-        for cat_name, filtro in categorias.items():
-            zip_path = persist_dir / f"{cat_name}.zip"
+        # Agrupar PDFs por periodo y tipo
+        groups = {}  # key: (periodo, tipo) -> list of pdf paths
+        for file in all_pdfs:
+            rel = str(file.relative_to(output_dir))
+            rel_upper = rel.upper()
+
+            # Detectar periodo (primer componente del path)
+            parts = file.relative_to(output_dir).parts
+            periodo = parts[0] if len(parts) > 1 else "GENERAL"
+
+            # Detectar tipo
+            is_sinrenombrar = "SINRENOMBRAR" in rel_upper
+            if is_sinrenombrar:
+                if "ZTX" in rel_upper or "ZENTRIX" in rel_upper:
+                    tipo = "ZENTRIX_SINRENOMBRAR"
+                elif "ARO" in rel_upper:
+                    tipo = "ARO_SINRENOMBRAR"
+                else:
+                    tipo = "OTROS_SINRENOMBRAR"
+            elif "ZENTRIX" in rel_upper:
+                tipo = "ZENTRIX"
+            elif "/ARO/" in ("/" + rel_upper + "/") or rel_upper.startswith("ARO/"):
+                tipo = "ARO"
+            else:
+                tipo = "OTROS"
+
+            key = (periodo, tipo)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(file)
+
+        # Crear un ZIP por cada grupo (periodo + tipo), archivos planos
+        for (periodo, tipo), files in sorted(groups.items()):
+            zip_name = f"{tipo}_{periodo}"
+            zip_path = persist_dir / f"{zip_name}.zip"
             count = 0
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                for file in all_pdfs:
-                    rel = file.relative_to(output_dir)
-                    if filtro(rel):
-                        zf.write(file, rel)
-                        count += 1
+                for file in files:
+                    # Archivo plano: solo el nombre, sin subcarpetas
+                    zf.write(file, file.name)
+                    count += 1
 
             if count > 0:
                 size_mb = zip_path.stat().st_size / (1024 * 1024)
-                zips_info[cat_name] = {
+                zips_info[zip_name] = {
                     "path": str(zip_path),
                     "count": count,
                     "size_mb": size_mb,
+                    "periodo": periodo,
+                    "tipo": tipo,
                 }
-                log(f"[OK] {cat_name}: {count} archivos ({size_mb:.1f} MB)")
+                log(f"[OK] {zip_name}: {count} archivos ({size_mb:.1f} MB)")
             else:
                 zip_path.unlink(missing_ok=True)
-                log(f"[INFO] {cat_name}: 0 archivos")
 
         log("[DONE] Proceso completado")
         progress_bar.progress(100, text="Listo!")
@@ -460,60 +489,243 @@ def procesar_todo(uploaded_files, csv_url, simulacion, progress_bar, log):
         return {"zips_info": zips_info, "stats": final_stats}
 
 
+# ─── Estilos CSS ─────────────────────────────────────────────────
+def inject_custom_css():
+    st.markdown("""
+    <style>
+    /* ── Tipografia Roboto ── */
+    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;600&display=swap');
+
+    html, body, [class*="css"] {
+        font-family: 'Roboto', sans-serif !important;
+    }
+
+    /* ── Fondo blanco limpio ── */
+    .stApp {
+        background-color: #ffffff !important;
+    }
+    section[data-testid="stSidebar"] {
+        background-color: #f8f9fc !important;
+        border-right: 1px solid #e8e9f0;
+    }
+
+    /* ── Header con logo ── */
+    .humand-header {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 24px 0 16px 0;
+        border-bottom: 2px solid #eff2ff;
+        margin-bottom: 32px;
+    }
+    .humand-header img {
+        height: 44px;
+        border-radius: 8px;
+    }
+    .humand-header .title {
+        font-size: 24px;
+        font-weight: 600;
+        color: #213478;
+        letter-spacing: 0.2px;
+        line-height: 1.3;
+    }
+    .humand-header .subtitle {
+        font-size: 14px;
+        color: #636271;
+        letter-spacing: 0.2px;
+        margin-top: 2px;
+    }
+
+    /* ── Cards de estadisticas ── */
+    [data-testid="stMetric"] {
+        background: #f8f9fc;
+        border: 1px solid #e8e9f0;
+        border-radius: 8px;
+        padding: 16px 20px;
+    }
+    [data-testid="stMetricLabel"] {
+        font-size: 12px !important;
+        color: #636271 !important;
+        font-weight: 400 !important;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    [data-testid="stMetricValue"] {
+        font-size: 32px !important;
+        font-weight: 600 !important;
+        color: #213478 !important;
+    }
+
+    /* ── Botones de descarga ── */
+    .stDownloadButton > button {
+        background-color: #213478 !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 8px !important;
+        padding: 12px 24px !important;
+        font-weight: 600 !important;
+        font-size: 14px !important;
+        letter-spacing: 0.2px;
+        transition: background-color 0.2s ease;
+    }
+    .stDownloadButton > button:hover {
+        background-color: #6f93eb !important;
+        color: white !important;
+    }
+
+    /* ── Boton primario (Procesar) ── */
+    .stButton > button[kind="primary"],
+    button[data-testid="stBaseButton-primary"] {
+        background-color: #213478 !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 8px !important;
+        font-weight: 600 !important;
+        font-size: 16px !important;
+        padding: 12px 24px !important;
+        transition: background-color 0.2s ease;
+    }
+    .stButton > button[kind="primary"]:hover,
+    button[data-testid="stBaseButton-primary"]:hover {
+        background-color: #6f93eb !important;
+    }
+
+    /* ── Boton secundario ── */
+    .stButton > button[kind="secondary"],
+    button[data-testid="stBaseButton-secondary"] {
+        background-color: #ffffff !important;
+        color: #213478 !important;
+        border: 1px solid #213478 !important;
+        border-radius: 8px !important;
+        font-weight: 600 !important;
+    }
+
+    /* ── File uploader ── */
+    [data-testid="stFileUploader"] {
+        border: 2px dashed #c5cee8 !important;
+        border-radius: 12px !important;
+        padding: 24px !important;
+        background: #fafbff !important;
+    }
+
+    /* ── Progress bar ── */
+    .stProgress > div > div > div {
+        background-color: #6f93eb !important;
+    }
+
+    /* ── Success box ── */
+    .stSuccess {
+        background-color: #f0faf0 !important;
+        border-left-color: #34a853 !important;
+        border-radius: 8px !important;
+    }
+
+    /* ── Ocultar hamburger menu y footer ── */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+
+    /* ── Section divider ── */
+    .section-divider {
+        height: 1px;
+        background: #e8e9f0;
+        margin: 24px 0;
+    }
+
+    /* ── Download section title ── */
+    .download-title {
+        font-size: 18px;
+        font-weight: 600;
+        color: #303036;
+        margin-bottom: 8px;
+        letter-spacing: 0.2px;
+    }
+    .download-subtitle {
+        font-size: 14px;
+        color: #636271;
+        margin-bottom: 20px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+
 # ─── Interfaz Streamlit ──────────────────────────────────────────
 
-# Labels para botones de descarga
-DOWNLOAD_LABELS = {
-    "ZENTRIX": ("ZENTRIX (renombrados)", "primary"),
-    "ARO": ("ARO (renombrados)", "primary"),
-    "ZENTRIX_SINRENOMBRAR": ("ZENTRIX sin renombrar", "secondary"),
-    "ARO_SINRENOMBRAR": ("ARO sin renombrar", "secondary"),
-}
-
-
 def mostrar_resultados():
-    """Muestra estadísticas y botones de descarga desde session_state."""
+    """Muestra estadisticas y botones de descarga desde session_state."""
     stats = st.session_state.get("resultado_stats")
     zips_info = st.session_state.get("resultado_zips_info")
 
     if not stats or not zips_info:
         return
 
-    st.markdown("---")
-    st.success("Proceso completado!")
+    st.success("Proceso completado")
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("PDFs encontrados", stats.get("pdfs_encontrados", 0))
     with col2:
-        st.metric("Renombrados", stats.get("renombrados", 0))
+        st.metric("ARO", stats.get("aro", 0))
     with col3:
-        st.metric("Sin renombrar", stats.get("sin_renombrar", 0))
+        st.metric("ZENTRIX", stats.get("zentrix", 0))
+    with col4:
+        st.metric("Renombrados", stats.get("renombrados", 0))
 
-    st.markdown("---")
-    st.markdown("### Descargas")
-    st.caption("Podes descargar todos — cada boton funciona de forma independiente.")
+    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="download-title">Descargas</div>', unsafe_allow_html=True)
+    st.markdown('<div class="download-subtitle">Cada boton descarga de forma independiente. Podes bajar todos.</div>', unsafe_allow_html=True)
 
-    for cat_name, (label, btn_type) in DOWNLOAD_LABELS.items():
-        if cat_name in zips_info:
-            z = zips_info[cat_name]
+    # Separar renombrados de sin renombrar
+    renombrados = {k: v for k, v in zips_info.items() if "SINRENOMBRAR" not in k}
+    sin_renombrar = {k: v for k, v in zips_info.items() if "SINRENOMBRAR" in k}
+
+    # Mostrar renombrados
+    if renombrados:
+        cols = st.columns(min(len(renombrados), 3))
+        for i, (zip_name, z) in enumerate(sorted(renombrados.items())):
             zip_path = Path(z["path"])
-            if zip_path.exists():
-                zip_bytes = zip_path.read_bytes()
-                st.download_button(
-                    label=f"{label}  —  {z['count']} archivos  ({z['size_mb']:.0f} MB)",
-                    data=zip_bytes,
-                    file_name=f"{cat_name.lower()}.zip",
-                    mime="application/zip",
-                    type=btn_type,
-                    use_container_width=True,
-                    key=f"download_{cat_name}",
-                )
-            else:
-                st.warning(f"{label}: archivo no disponible (sesion expirada)")
+            with cols[i % len(cols)]:
+                if zip_path.exists():
+                    zip_bytes = zip_path.read_bytes()
+                    tipo = z.get("tipo", "")
+                    periodo = z.get("periodo", "")
+                    st.download_button(
+                        label=f"{tipo}  {periodo}  ({z['count']} archivos)",
+                        data=zip_bytes,
+                        file_name=f"{zip_name}.zip",
+                        mime="application/zip",
+                        use_container_width=True,
+                        key=f"dl_{zip_name}",
+                    )
+                else:
+                    st.warning(f"{zip_name}: sesion expirada")
+
+    # Mostrar sin renombrar
+    if sin_renombrar:
+        st.markdown("")
+        st.caption("Sin renombrar")
+        cols2 = st.columns(min(len(sin_renombrar), 3))
+        for i, (zip_name, z) in enumerate(sorted(sin_renombrar.items())):
+            zip_path = Path(z["path"])
+            with cols2[i % len(cols2)]:
+                if zip_path.exists():
+                    zip_bytes = zip_path.read_bytes()
+                    tipo_base = z.get("tipo", "").replace("_SINRENOMBRAR", "")
+                    periodo = z.get("periodo", "")
+                    st.download_button(
+                        label=f"{tipo_base}  {periodo}  ({z['count']} archivos)",
+                        data=zip_bytes,
+                        file_name=f"{zip_name}.zip",
+                        mime="application/zip",
+                        use_container_width=True,
+                        key=f"dl_{zip_name}",
+                    )
+                else:
+                    st.warning(f"{zip_name}: sesion expirada")
 
     if not zips_info:
         st.warning("No se generaron archivos para descargar.")
+
+    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
     if st.button("Procesar nuevos archivos", use_container_width=True):
         st.session_state.pop("resultado_stats", None)
@@ -524,81 +736,77 @@ def mostrar_resultados():
 
 def main():
     st.set_page_config(
-        page_title="Procesador de Recibos",
+        page_title="Recibos | Humand",
         page_icon="📄",
         layout="wide",
+        initial_sidebar_state="collapsed",
     )
 
-    with st.sidebar:
-        st.markdown("### Procesador de Recibos")
-        st.caption("v2.3")
-        st.divider()
+    inject_custom_css()
 
-        modo = st.selectbox("Modo", ["Real (renombra archivos)", "Simulacion (solo preview)"])
-        simulacion = "Simulacion" in modo
+    # ── Header con logo ──
+    logo_b64 = ""
+    if LOGO_PATH.exists():
+        logo_b64 = base64.b64encode(LOGO_PATH.read_bytes()).decode()
 
-        csv_url = st.text_input("URL del CSV (Redash)", value=DEFAULT_CSV_URL)
-
-        st.divider()
-        st.info(
-            "**Como funciona:**\n"
-            "1. Subi los archivos ZIP/RAR/PDF\n"
-            "2. Se extraen y clasifican por periodo en ARO / ZENTRIX\n"
-            "3. Se renombran con el formato final\n"
-            "`Recibo_SEM39_ARO_usuario.pdf`\n\n"
-            "Los que no se pueden renombrar van a\n"
-            "`ARO_SEM39_SINRENOMBRAR/`"
-        )
-
-    st.title("Procesador de Recibos")
-    st.caption("Extrae, clasifica y renombra PDFs automaticamente")
+    if logo_b64:
+        st.markdown(f"""
+        <div class="humand-header">
+            <img src="data:image/svg+xml;base64,{logo_b64}" alt="Humand">
+            <div>
+                <div class="title">Procesador de Recibos</div>
+                <div class="subtitle">Extrae, clasifica y renombra PDFs automaticamente</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div class="humand-header">
+            <div>
+                <div class="title">Procesador de Recibos</div>
+                <div class="subtitle">Extrae, clasifica y renombra PDFs automaticamente</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
     # Si ya hay resultados en session_state, mostrarlos directamente
     if "resultado_zips_info" in st.session_state:
-        # Mostrar logs del procesamiento anterior
-        saved_logs = st.session_state.get("resultado_logs", [])
-        if saved_logs:
-            with st.expander("Ver log del procesamiento", expanded=False):
-                st.code("\n".join(saved_logs), language="bash")
         mostrar_resultados()
         return
 
-    # Upload
-    st.markdown("#### Subi los archivos")
+    # ── Upload ──
     uploaded_files = st.file_uploader(
-        "Arrastra archivos aca o hace click para seleccionar",
+        "Arrastra archivos o hace click para seleccionar",
         type=["zip", "rar", "pdf"],
         accept_multiple_files=True,
         help="ZIP, RAR o PDF — podes subir varios a la vez",
     )
 
     if uploaded_files:
-        st.markdown(f"**{len(uploaded_files)} archivo(s) seleccionado(s):**")
-        for f in uploaded_files:
-            size_mb = f.size / (1024 * 1024)
-            st.text(f"  {f.name}  ({size_mb:.1f} MB)")
+        total_size = sum(f.size for f in uploaded_files) / (1024 * 1024)
+        st.caption(f"{len(uploaded_files)} archivo(s) seleccionado(s)  —  {total_size:.1f} MB en total")
+
+    st.markdown("")
+
+    csv_url = DEFAULT_CSV_URL
 
     if st.button("Procesar archivos", type="primary", disabled=not uploaded_files,
                   use_container_width=True):
 
-        st.markdown("---")
-        st.markdown("#### Procesando...")
-
         progress_bar = st.progress(0, text="Iniciando...")
-        log_container = st.empty()
         logs = []
 
         def log(msg):
             logs.append(msg)
-            log_container.code("\n".join(logs), language="bash")
 
         try:
             result = procesar_todo(
-                uploaded_files, csv_url, simulacion, progress_bar, log
+                uploaded_files, csv_url, progress_bar, log
             )
         except Exception as e:
-            st.error(f"ERROR: {e}")
-            st.code("\n".join(logs), language="bash")
+            st.error(f"Error: {e}")
+            with st.expander("Ver log de errores"):
+                st.code("\n".join(logs), language="bash")
             result = None
 
         if result and result.get("zips_info"):
