@@ -421,13 +421,22 @@ def procesar_todo(uploaded_files, csv_url, progress_bar, log):
         zips_info = {}
         all_pdfs = list(output_dir.rglob("*.pdf"))
 
-        # Detectar periodo global (todos los periodos encontrados menos GENERAL)
+        # Detectar periodo global desde las carpetas de classify_pdfs_by_period
+        # Esas carpetas son: output_dir/PERIODO/ARO o output_dir/PERIODO/ZENTRIX
+        # Ignorar carpetas SINRENOMBRAR y GENERAL
         periodos = set()
-        for file in all_pdfs:
-            parts = file.relative_to(output_dir).parts
-            if len(parts) > 1 and parts[0].upper() != "GENERAL":
-                periodos.add(parts[0])
-        # Usar el periodo si hay exactamente uno; si hay varios concatenarlos
+        for subdir in output_dir.iterdir():
+            if not subdir.is_dir():
+                continue
+            name_up = subdir.name.upper()
+            # Ignorar carpetas que NO son periodos
+            if any(x in name_up for x in ["SINRENOMBRAR", "ARO", "ZENTRIX", "ZTX", "GENERAL"]):
+                continue
+            periodos.add(subdir.name)
+        # Si no encontro periodos en carpetas, buscar en periodos_set de class_stats
+        if not periodos and class_stats.get("periodos_set"):
+            periodos = {p for p in class_stats["periodos_set"] if p.upper() != "GENERAL"}
+        # Armar string de periodo
         if len(periodos) == 1:
             periodo_str = list(periodos)[0]
         elif len(periodos) > 1:
