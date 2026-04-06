@@ -1,1 +1,2 @@
-unrar
+unrar-free
+p7zip-full

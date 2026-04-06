@@ -71,21 +71,22 @@ def extract_rfc(pdf_path: Path, x: float, y: float, width=150, height=30) -> str
 
 # ─── Extracción de archivos ───────────────────────────────────────
 def extract_rar(rar_path: Path, dest_dir: Path) -> bool:
-    """Extrae RAR usando unrar (instalado via packages.txt en Streamlit Cloud)."""
-    for tool in ["unrar", "unar"]:
+    """Extrae RAR usando múltiples métodos (unrar-free, 7z, unar, rarfile)."""
+    tools = [
+        ["unrar-free", "-x", str(rar_path), str(dest_dir) + "/"],
+        ["unrar", "x", "-o+", str(rar_path), str(dest_dir) + "/"],
+        ["7z", "x", "-y", f"-o{dest_dir}", str(rar_path)],
+        ["unar", "-force-overwrite", "-no-directory", "-output-directory", str(dest_dir), str(rar_path)],
+    ]
+    for cmd in tools:
         try:
-            if tool == "unrar":
-                cmd = [tool, "x", "-o+", str(rar_path), str(dest_dir) + "/"]
-            else:
-                cmd = [tool, "-force-overwrite", "-no-directory",
-                       "-output-directory", str(dest_dir), str(rar_path)]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode == 0:
                 return True
         except (FileNotFoundError, subprocess.TimeoutExpired):
             continue
 
-    # Fallback: intentar con rarfile de Python
+    # Fallback: rarfile de Python
     try:
         import rarfile
         with rarfile.RarFile(str(rar_path), "r") as rf:
